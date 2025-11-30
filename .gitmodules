@@ -1,0 +1,9 @@
+[submodule "libraries/sol2"]
+	path = libraries/sol2
+	url = https://github.com/ThePhD/sol2.git
+[submodule "libraries/lua"]
+	path = libraries/lua
+	url = https://github.com/lua/lua.git
+[submodule "libraries/fmt"]
+	path = libraries/fmt
+	url = https://github.com/fmtlib/fmt.git
