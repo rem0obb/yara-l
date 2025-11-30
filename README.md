@@ -8,7 +8,7 @@ To perform a build, you will need to have the Yara library installed on your mac
 
 ### Clone the Repository
 ```
-git clone --recurse-submodules -j8 git@github.com:exoctl/exoctl.git
+git clone --recurse-submodules -j8 git@github.com:rem0obb/yara-l.git
 ``` 
 
 ### Build on Linux
