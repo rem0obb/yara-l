@@ -22,7 +22,7 @@ make -j8
 
 # Examples usage
 
-```
+```lua
 require("yaral")  
 
 local yara = Yara.new()
