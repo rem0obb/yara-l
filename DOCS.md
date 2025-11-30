@@ -32,7 +32,7 @@ To use this extension, you need to build it from source. It depends on:
 1. Clone the repository (assuming it includes submodules for dependencies like Sol3):
 
 ```
-git clone --recurse-submodules -j8 <repository-url>
+git clone --recurse-submodules -j8 git@github.com:rem0obb/yara-l.git 
 ```
 
 2. Create a build directory:
