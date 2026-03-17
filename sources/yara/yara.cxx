@@ -22,6 +22,8 @@ namespace yara
         const int yr_compiler = Yara::load_compiler();
         if (yr_compiler != ERROR_SUCCESS)
         {
+            // Balance the yr_initialize() above before throwing
+            yr_finalize();
             throw yara::exception::Initialize(
                 "yr_compiler_create() error initialize compiler yara");
         }
@@ -146,20 +148,23 @@ namespace yara
         const std::unique_lock<std::shared_mutex> rules_lock(rules_mutex_);
         const std::lock_guard<std::mutex> compiler_lock(compiler_mutex_);
 
-        if (yr_finalize() != ERROR_SUCCESS)
-        {
-            yara::exception::Finalize("yr_finalize() error finalize yara");
-        }
-
+        // Destroy YARA objects BEFORE yr_finalize(). yr_finalize() calls
+        // yr_modules_finalize() which tears down global module state; the
+        // compiler and rules destructors must run while that state is still
+        // valid, otherwise they cause use-after-free -> SIGABRT.
         if (!IS_NULL(yara_compiler_))
         {
             yr_compiler_destroy(yara_compiler_);
+            yara_compiler_ = nullptr;
         }
 
         if (!IS_NULL(yara_rules_))
         {
             yr_rules_destroy(yara_rules_);
+            yara_rules_ = nullptr;
         }
+
+        yr_finalize();
     }
 
     const int Yara::set_rule_file(const std::string &p_path,
@@ -239,12 +244,90 @@ namespace yara
 
         const int compiler_rules =
             yr_compiler_get_rules(yara_compiler_, &yara_rules_);
-        if (compiler_rules != ERROR_SUCCESS ||
-            compiler_rules == ERROR_INSUFFICIENT_MEMORY)
+        if (compiler_rules != ERROR_SUCCESS)
         {
             throw yara::exception::CompilerRules(
-                "yr_compiler_get_rules() falied compiler rules " +
-                compiler_rules);
+                fmt::format("yr_compiler_get_rules() failed, error code: {}",
+                            compiler_rules));
+        }
+    }
+
+    void Yara::scan_file(const std::string &p_path,
+                         YR_CALLBACK_FUNC p_callback,
+                         void *p_data,
+                         yara::type::Flags p_flags) const
+    {
+        const std::shared_lock<std::shared_mutex> lock(rules_mutex_);
+
+        if (IS_NULL(yara_rules_))
+        {
+            throw yara::exception::Scan(
+                "scan_file() failed: call load_rules() first");
+        }
+
+        const int scan_result = yr_rules_scan_file(
+            yara_rules_, p_path.c_str(), (int)p_flags, p_callback, p_data, 0);
+        if (scan_result != ERROR_SUCCESS)
+        {
+            throw yara::exception::Scan(
+                fmt::format("yr_rules_scan_file() failed, error code: {}",
+                            scan_result));
+        }
+    }
+
+    void Yara::matches_foreach(
+        YR_SCAN_CONTEXT *p_context,
+        YR_STRING *p_string,
+        const std::function<void(const YR_MATCH &)> &p_callback)
+    {
+        const std::shared_lock<std::shared_mutex> lock(rules_mutex_);
+        const YR_MATCH *match;
+        yr_string_matches_foreach(p_context, p_string, match)
+        {
+            execute_safely([&]()
+                           { p_callback(*match); });
+        }
+    }
+
+    void Yara::define_integer_variable(const std::string &p_identifier,
+                                       int64_t p_value) const
+    {
+        const std::lock_guard<std::mutex> lock(compiler_mutex_);
+        yr_compiler_define_integer_variable(
+            yara_compiler_, p_identifier.c_str(), p_value);
+    }
+
+    void Yara::define_boolean_variable(const std::string &p_identifier,
+                                       bool p_value) const
+    {
+        const std::lock_guard<std::mutex> lock(compiler_mutex_);
+        yr_compiler_define_boolean_variable(
+            yara_compiler_, p_identifier.c_str(), p_value ? 1 : 0);
+    }
+
+    void Yara::define_string_variable(const std::string &p_identifier,
+                                      const std::string &p_value) const
+    {
+        const std::lock_guard<std::mutex> lock(compiler_mutex_);
+        yr_compiler_define_string_variable(
+            yara_compiler_, p_identifier.c_str(), p_value.c_str());
+    }
+
+    void Yara::define_float_variable(const std::string &p_identifier,
+                                     double p_value) const
+    {
+        const std::lock_guard<std::mutex> lock(compiler_mutex_);
+        yr_compiler_define_float_variable(
+            yara_compiler_, p_identifier.c_str(), p_value);
+    }
+
+    void Yara::set_compiler_callback(YR_COMPILER_CALLBACK_FUNC p_callback,
+                                     void *p_user_data)
+    {
+        const std::lock_guard<std::mutex> lock(compiler_mutex_);
+        if (!IS_NULL(yara_compiler_))
+        {
+            yr_compiler_set_callback(yara_compiler_, p_callback, p_user_data);
         }
     }
 
@@ -255,26 +338,25 @@ namespace yara
     {
         const std::shared_lock<std::shared_mutex> lock(rules_mutex_);
 
-        if (yara_compiler_ != nullptr && yara_rules_ != nullptr)
-        {
-            if (yr_rules_scan_mem(
-                    yara_rules_,
-                    reinterpret_cast<const uint8_t *>(p_buffer.data()),
-                    p_buffer.size(),
-                    (int)p_flags,
-                    p_callback,
-                    p_data,
-                    0) == ERROR_INTERNAL_FATAL_ERROR)
-            {
-                throw yara::exception::Scan("yr_rules_scan_mem() falied "
-                                            "scan buffer, internal error");
-            }
-        }
-        else
+        if (IS_NULL(yara_rules_))
         {
             throw yara::exception::Scan(
-                "scan_bytes() falied check if compiler rules sucessful use "
-                "load_rules()");
+                "scan_bytes() failed: call load_rules() first");
+        }
+
+        const int scan_result = yr_rules_scan_mem(
+            yara_rules_,
+            reinterpret_cast<const uint8_t *>(p_buffer.data()),
+            p_buffer.size(),
+            (int)p_flags,
+            p_callback,
+            p_data,
+            0);
+        if (scan_result != ERROR_SUCCESS)
+        {
+            throw yara::exception::Scan(
+                fmt::format("yr_rules_scan_mem() failed, error code: {}",
+                            scan_result));
         }
     }
 } // namespace yara

@@ -32,5 +32,6 @@ namespace yara
             ReportRulesNotMatching = SCAN_FLAGS_REPORT_RULES_NOT_MATCHING
         };
         using Rule = YR_RULE;
+        using Match = YR_MATCH;
     } // namespace type
 } // namespace yara

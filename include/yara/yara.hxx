@@ -34,6 +34,11 @@ namespace yara
                         void *,
                         yara::type::Flags) const;
 
+        void scan_file(const std::string &,
+                       YR_CALLBACK_FUNC,
+                       void *,
+                       yara::type::Flags) const;
+
         void rule_disable(YR_RULE &);
         void rule_enable(YR_RULE &);
         void rules_foreach(const std::function<void(const YR_RULE &)> &);
@@ -46,6 +51,10 @@ namespace yara
 
         void tags_foreach(YR_RULE *,
                           const std::function<void(const char *)> &);
+
+        void matches_foreach(YR_SCAN_CONTEXT *,
+                             YR_STRING *,
+                             const std::function<void(const YR_MATCH &)> &);
 
         const int load_rules_file(const char *);
         const int save_rules_file(const char *);
@@ -66,6 +75,14 @@ namespace yara
         [[nodiscard]] const int set_rule_file(const std::string &,
                                               const std::string &,
                                               const std::string &) const;
+
+        void define_integer_variable(const std::string &, int64_t) const;
+        void define_boolean_variable(const std::string &, bool) const;
+        void define_string_variable(const std::string &,
+                                    const std::string &) const;
+        void define_float_variable(const std::string &, double) const;
+
+        void set_compiler_callback(YR_COMPILER_CALLBACK_FUNC, void *);
 
     private:
         mutable std::mutex compiler_mutex_;

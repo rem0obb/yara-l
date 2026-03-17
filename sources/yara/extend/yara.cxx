@@ -49,6 +49,26 @@ namespace yara::extend
               yara::type::Flags::ReportRulesNotMatching}});
     }
 
+    void Yara::bind_match()
+    {
+        lua_.state.new_usertype<YR_MATCH>(
+            "Match",
+            "new",
+            sol::constructors<YR_MATCH()>(),
+            "base",
+            sol::readonly(&YR_MATCH::base),
+            "offset",
+            sol::readonly(&YR_MATCH::offset),
+            "match_length",
+            sol::readonly(&YR_MATCH::match_length),
+            "data_length",
+            sol::readonly(&YR_MATCH::data_length),
+            "data",
+            sol::property([](const YR_MATCH &m)
+                          { return std::string(reinterpret_cast<const char *>(m.data),
+                                               m.data_length); }));
+    }
+
     void Yara::bind_string()
     {
         lua_.state.new_usertype<YR_STRING>(
@@ -262,6 +282,12 @@ namespace yara::extend
                 {
                     return;
                 }
+                struct LuaScanData
+                {
+                    sol::function *func;
+                    std::exception_ptr pending;
+                };
+                LuaScanData cbData{&func, nullptr};
                 self.scan_bytes(
                     buffer,
                     +[](YR_SCAN_CONTEXT *context,
@@ -269,69 +295,70 @@ namespace yara::extend
                         void *message_data,
                         void *user_data) -> int
                     {
-                        auto *scan_bytes_func =
-                            static_cast<sol::function *>(user_data);
-                        if (!scan_bytes_func || !scan_bytes_func->valid())
-                        {
+                        auto *d = static_cast<LuaScanData *>(user_data);
+                        if (!d->func || !d->func->valid())
                             return CALLBACK_CONTINUE;
-                        }
-
-                        sol::protected_function_result result;
-                        switch (message)
+                        try
                         {
-                        case CALLBACK_MSG_RULE_NOT_MATCHING:
-                        case CALLBACK_MSG_RULE_MATCHING:
-                        {
-                            const YR_RULE *rule =
-                                reinterpret_cast<YR_RULE *>(message_data);
-                            result = (*scan_bytes_func)(message, rule);
-                            break;
+                            sol::protected_function_result result;
+                            switch (message)
+                            {
+                            case CALLBACK_MSG_RULE_NOT_MATCHING:
+                            case CALLBACK_MSG_RULE_MATCHING:
+                            {
+                                const YR_RULE *rule =
+                                    reinterpret_cast<YR_RULE *>(message_data);
+                                result = (*d->func)(message, rule);
+                                break;
+                            }
+                            case CALLBACK_MSG_SCAN_FINISHED:
+                                result = (*d->func)(message, sol::lua_nil);
+                                break;
+                            case CALLBACK_MSG_TOO_MANY_MATCHES:
+                            {
+                                const YR_STRING *string =
+                                    reinterpret_cast<YR_STRING *>(message_data);
+                                result = (*d->func)(message, string);
+                                break;
+                            }
+                            case CALLBACK_MSG_CONSOLE_LOG:
+                            {
+                                const char *log =
+                                    reinterpret_cast<const char *>(message_data);
+                                result = (*d->func)(message, log);
+                                break;
+                            }
+                            case CALLBACK_MSG_IMPORT_MODULE:
+                            {
+                                const YR_MODULE_IMPORT *module_import =
+                                    reinterpret_cast<YR_MODULE_IMPORT *>(
+                                        message_data);
+                                result = (*d->func)(message, module_import);
+                                break;
+                            }
+                            default:
+                                result = (*d->func)(message);
+                                break;
+                            }
+                            if (!result.valid())
+                            {
+                                sol::error err = result;
+                                throw lua::exception::Runtime(fmt::format(
+                                    "Lua callback error in scan_bytes: {}",
+                                    err.what()));
+                            }
+                            return static_cast<int>(result);
                         }
-                        case CALLBACK_MSG_SCAN_FINISHED:
-                            result =
-                                (*scan_bytes_func)(message, sol::lua_nil);
-                            break;
-                        case CALLBACK_MSG_TOO_MANY_MATCHES:
+                        catch (...)
                         {
-                            const YR_STRING *string =
-                                reinterpret_cast<YR_STRING *>(message_data);
-                            result = (*scan_bytes_func)(message, string);
-                            break;
-                        }
-                        case CALLBACK_MSG_CONSOLE_LOG:
-                        {
-                            const char *log =
-                                reinterpret_cast<const char *>(
-                                    message_data);
-                            result = (*scan_bytes_func)(message, log);
-                            break;
-                        }
-                        case CALLBACK_MSG_IMPORT_MODULE:
-                        {
-                            const YR_MODULE_IMPORT *module_import =
-                                reinterpret_cast<YR_MODULE_IMPORT *>(
-                                    message_data);
-                            result =
-                                (*scan_bytes_func)(message, module_import);
-                            break;
-                        }
-                        default:
-                            result = (*scan_bytes_func)(message);
-                            break;
-                        }
-
-                        if (!result.valid())
-                        {
-                            sol::error err = result;
-                            throw lua::exception::Runtime(fmt::format(
-                                "Lua callback error in scan_bytes: {}\n",
-                                err.what()));
+                            d->pending = std::current_exception();
                             return CALLBACK_ABORT;
                         }
-                        return result;
                     },
-                    static_cast<void *>(&func),
+                    static_cast<void *>(&cbData),
                     flags);
+                if (cbData.pending)
+                    std::rethrow_exception(cbData.pending);
             },
             "load_rules_file",
             &yara::Yara::load_rules_file,
@@ -340,12 +367,174 @@ namespace yara::extend
             "set_rule_file",
             &yara::Yara::set_rule_file,
             "save_rules_file",
-            &yara::Yara::save_rules_file);
+            &yara::Yara::save_rules_file,
+            "scan_file",
+            [](yara::Yara &self,
+               const std::string &path,
+               sol::function func,
+               yara::type::Flags flags)
+            {
+                if (!func.valid())
+                {
+                    return;
+                }
+                struct LuaScanData
+                {
+                    sol::function *func;
+                    std::exception_ptr pending;
+                };
+                LuaScanData cbData{&func, nullptr};
+                self.scan_file(
+                    path,
+                    +[](YR_SCAN_CONTEXT *context,
+                        int message,
+                        void *message_data,
+                        void *user_data) -> int
+                    {
+                        auto *d = static_cast<LuaScanData *>(user_data);
+                        if (!d->func || !d->func->valid())
+                            return CALLBACK_CONTINUE;
+                        try
+                        {
+                            sol::protected_function_result result;
+                            switch (message)
+                            {
+                            case CALLBACK_MSG_RULE_NOT_MATCHING:
+                            case CALLBACK_MSG_RULE_MATCHING:
+                            {
+                                const YR_RULE *rule =
+                                    reinterpret_cast<YR_RULE *>(message_data);
+                                result = (*d->func)(message, rule);
+                                break;
+                            }
+                            case CALLBACK_MSG_SCAN_FINISHED:
+                                result = (*d->func)(message, sol::lua_nil);
+                                break;
+                            case CALLBACK_MSG_TOO_MANY_MATCHES:
+                            {
+                                const YR_STRING *string =
+                                    reinterpret_cast<YR_STRING *>(message_data);
+                                result = (*d->func)(message, string);
+                                break;
+                            }
+                            case CALLBACK_MSG_CONSOLE_LOG:
+                            {
+                                const char *log =
+                                    reinterpret_cast<const char *>(message_data);
+                                result = (*d->func)(message, log);
+                                break;
+                            }
+                            case CALLBACK_MSG_IMPORT_MODULE:
+                            {
+                                const YR_MODULE_IMPORT *module_import =
+                                    reinterpret_cast<YR_MODULE_IMPORT *>(
+                                        message_data);
+                                result = (*d->func)(message, module_import);
+                                break;
+                            }
+                            default:
+                                result = (*d->func)(message);
+                                break;
+                            }
+                            if (!result.valid())
+                            {
+                                sol::error err = result;
+                                throw lua::exception::Runtime(fmt::format(
+                                    "Lua callback error in scan_file: {}",
+                                    err.what()));
+                            }
+                            return static_cast<int>(result);
+                        }
+                        catch (...)
+                        {
+                            d->pending = std::current_exception();
+                            return CALLBACK_ABORT;
+                        }
+                    },
+                    static_cast<void *>(&cbData),
+                    flags);
+                if (cbData.pending)
+                    std::rethrow_exception(cbData.pending);
+            },
+            "matches_foreach",
+            [](yara::Yara &self,
+               YR_SCAN_CONTEXT *context,
+               YR_STRING *string,
+               sol::function func)
+            {
+                if (!func.valid())
+                {
+                    return;
+                }
+                self.matches_foreach(
+                    context,
+                    string,
+                    [&func](const YR_MATCH &match)
+                    {
+                        sol::protected_function_result result =
+                            func(&match);
+                        if (!result.valid())
+                        {
+                            sol::error err = result;
+                            throw lua::exception::Runtime(fmt::format(
+                                "Lua callback error in matches_foreach: {}\n",
+                                err.what()));
+                        }
+                    });
+            },
+            "define_integer_variable",
+            &yara::Yara::define_integer_variable,
+            "define_boolean_variable",
+            &yara::Yara::define_boolean_variable,
+            "define_string_variable",
+            &yara::Yara::define_string_variable,
+            "define_float_variable",
+            &yara::Yara::define_float_variable,
+            "set_compiler_callback",
+            [](yara::Yara &self, sol::function func)
+            {
+                if (!func.valid())
+                {
+                    return;
+                }
+                auto func_ptr =
+                    std::make_shared<sol::function>(std::move(func));
+                self.set_compiler_callback(
+                    +[](int error_level,
+                        const char *file_name,
+                        int line_number,
+                        const YR_RULE *rule,
+                        const char *message,
+                        void *user_data)
+                    {
+                        auto *fp =
+                            static_cast<std::shared_ptr<sol::function> *>(
+                                user_data);
+                        if (!fp || !(*fp)->valid())
+                            return;
+                        try
+                        {
+                            (**fp)(error_level,
+                                   file_name ? std::string(file_name)
+                                             : std::string(),
+                                   line_number,
+                                   message ? std::string(message)
+                                           : std::string());
+                        }
+                        catch (...)
+                        {
+                            // Never let exceptions escape through YARA's C code
+                        }
+                    },
+                    static_cast<void *>(
+                        new std::shared_ptr<sol::function>(func_ptr)));
+            });
     }
 
     void Yara::_bind()
     {
         Yara::bind_import();
+        Yara::bind_match();
         Yara::bind_string();
         Yara::bind_namespace();
         Yara::bind_meta();

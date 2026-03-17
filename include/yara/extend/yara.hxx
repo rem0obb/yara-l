@@ -17,6 +17,7 @@ namespace yara::extend
     lua::Lua &lua_;
     inline void bind_flags();
     inline void bind_import();
+    inline void bind_match();
     inline void bind_string();
     inline void bind_namespace();
     inline void bind_meta();
