@@ -7,23 +7,41 @@
 #include <mutex>
 #include <sys/types.h>
 #include <unistd.h>
+#include <utility>
 
 namespace yara
 {
+    std::mutex Yara::lifecycle_mutex_;
+    size_t Yara::lifecycle_refs_ = 0;
 
-    Yara::Yara() : yara_compiler_(nullptr), yara_rules_(nullptr)
+    Yara::Yara()
+        : yara_compiler_(nullptr),
+          yara_rules_(nullptr),
+          compiler_callback_user_data_(nullptr),
+          compiler_callback_cleanup_(nullptr)
     {
-        if (yr_initialize() != ERROR_SUCCESS)
         {
-            throw yara::exception::Initialize(
-                "yr_initialize() error initialize yara");
+            std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+            if (lifecycle_refs_ == 0 && yr_initialize() != ERROR_SUCCESS)
+            {
+                throw yara::exception::Initialize(
+                    "yr_initialize() error initialize yara");
+            }
+            ++lifecycle_refs_;
         }
 
         const int yr_compiler = Yara::load_compiler();
         if (yr_compiler != ERROR_SUCCESS)
         {
-            // Balance the yr_initialize() above before throwing
-            yr_finalize();
+            std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+            if (lifecycle_refs_ > 0)
+            {
+                --lifecycle_refs_;
+                if (lifecycle_refs_ == 0)
+                {
+                    yr_finalize();
+                }
+            }
             throw yara::exception::Initialize(
                 "yr_compiler_create() error initialize compiler yara");
         }
@@ -38,6 +56,7 @@ namespace yara
     void Yara::unload_compiler()
     {
         std::lock_guard<std::mutex> lock(compiler_mutex_);
+        clear_compiler_callback_locked();
         if (!IS_NULL(yara_compiler_))
         {
             yr_compiler_destroy(yara_compiler_);
@@ -152,6 +171,7 @@ namespace yara
         // yr_modules_finalize() which tears down global module state; the
         // compiler and rules destructors must run while that state is still
         // valid, otherwise they cause use-after-free -> SIGABRT.
+        clear_compiler_callback_locked();
         if (!IS_NULL(yara_compiler_))
         {
             yr_compiler_destroy(yara_compiler_);
@@ -164,7 +184,15 @@ namespace yara
             yara_rules_ = nullptr;
         }
 
-        yr_finalize();
+        std::lock_guard<std::mutex> lifecycle_lock(lifecycle_mutex_);
+        if (lifecycle_refs_ > 0)
+        {
+            --lifecycle_refs_;
+            if (lifecycle_refs_ == 0)
+            {
+                yr_finalize();
+            }
+        }
     }
 
     const int Yara::set_rule_file(const std::string &p_path,
@@ -321,10 +349,25 @@ namespace yara
             yara_compiler_, p_identifier.c_str(), p_value);
     }
 
-    void Yara::set_compiler_callback(YR_COMPILER_CALLBACK_FUNC p_callback,
-                                     void *p_user_data)
+    void Yara::clear_compiler_callback_locked()
+    {
+        if (compiler_callback_cleanup_ && compiler_callback_user_data_)
+        {
+            compiler_callback_cleanup_(compiler_callback_user_data_);
+        }
+        compiler_callback_cleanup_ = nullptr;
+        compiler_callback_user_data_ = nullptr;
+    }
+
+    void Yara::set_compiler_callback(
+        YR_COMPILER_CALLBACK_FUNC p_callback,
+        void *p_user_data,
+        std::function<void(void *)> p_cleanup)
     {
         const std::lock_guard<std::mutex> lock(compiler_mutex_);
+        clear_compiler_callback_locked();
+        compiler_callback_user_data_ = p_user_data;
+        compiler_callback_cleanup_ = std::move(p_cleanup);
         if (!IS_NULL(yara_compiler_))
         {
             yr_compiler_set_callback(yara_compiler_, p_callback, p_user_data);

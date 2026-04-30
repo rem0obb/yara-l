@@ -82,9 +82,14 @@ namespace yara
                                     const std::string &) const;
         void define_float_variable(const std::string &, double) const;
 
-        void set_compiler_callback(YR_COMPILER_CALLBACK_FUNC, void *);
+        void set_compiler_callback(YR_COMPILER_CALLBACK_FUNC,
+                                   void *,
+                                   std::function<void(void *)> = {});
 
     private:
+        static std::mutex lifecycle_mutex_;
+        static size_t lifecycle_refs_;
+
         mutable std::mutex compiler_mutex_;
         mutable std::shared_mutex rules_mutex_;
 
@@ -97,6 +102,10 @@ namespace yara
 
         YR_COMPILER *yara_compiler_;
         mutable YR_RULES *yara_rules_;
+        void *compiler_callback_user_data_;
+        std::function<void(void *)> compiler_callback_cleanup_;
+
+        void clear_compiler_callback_locked();
         void compiler_rules() const;
     };
 } // namespace security

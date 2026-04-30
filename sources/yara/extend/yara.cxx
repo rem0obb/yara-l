@@ -2,6 +2,7 @@
 #include <lua/exception.hxx>
 #include <yara/extend/yara.hxx>
 #include <fmt/core.h>
+#include <memory>
 #include <yara/yara.hxx>
 
 namespace yara::extend
@@ -527,7 +528,12 @@ namespace yara::extend
                         }
                     },
                     static_cast<void *>(
-                        new std::shared_ptr<sol::function>(func_ptr)));
+                        new std::shared_ptr<sol::function>(func_ptr)),
+                    [](void *user_data)
+                    {
+                        delete static_cast<std::shared_ptr<sol::function> *>(
+                            user_data);
+                    });
             });
     }
 
